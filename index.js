@@ -19,7 +19,7 @@ async function connectToWA() {
         auth: state, 
         printQRInTerminal: true,
         connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 0
+        defaultQueryTimeoutMs: 30000 // Aumentado para esperar a resposta do zap
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -32,16 +32,18 @@ async function connectToWA() {
         
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            // Se a conexão fechar por erro de sessão (428), limpa a pasta e reinicia
-            if (statusCode === 428 || statusCode === 401) {
-                console.log("Limpando sessão corrompida...");
+            console.log("Conexão fechada por erro:", statusCode);
+            
+            // Se a sessão estiver "podre" (428 ou 401), limpa tudo
+            if (statusCode === 428 || statusCode === 401 || statusCode === 440) {
+                console.log("Limpando arquivos de sessão antigos...");
                 if (fs.existsSync('./auth_info')) fs.rmSync('./auth_info', { recursive: true, force: true });
             }
             connectToWA();
         } else if (connection === 'open') {
             qrCodeBase64 = null;
             connectionStatus = "Conectado";
-            console.log("WhatsApp Conectado com Sucesso!");
+            console.log("WHATSAPP CONECTADO E PRONTO");
         }
     });
 
@@ -50,23 +52,41 @@ async function connectToWA() {
 
 app.get('/status', (req, res) => res.json({ status: connectionStatus, qr: qrCodeBase64 }));
 
+// ROTA DE ENVIO COM VALIDAÇÃO DE ENTREGA
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
-    if (!sock || connectionStatus !== "Conectado") return res.status(503).json({ error: "Desconectado" });
+    
+    if (!sock || connectionStatus !== "Conectado") {
+        return res.status(503).json({ error: "O servidor não está conectado ao WhatsApp celular." });
+    }
 
     try {
-        // LIMPEZA TOTAL DO NÚMERO
+        // Limpeza do número
         let cleanNumber = String(number).replace(/\D/g, '');
-        if (cleanNumber.startsWith('0')) cleanNumber = cleanNumber.substring(1);
         if (!cleanNumber.startsWith('55')) cleanNumber = '55' + cleanNumber;
-
+        
         const jid = `${cleanNumber}@s.whatsapp.net`;
-        console.log(`Enviando para o JID oficial: ${jid}`);
 
-        await sock.sendMessage(jid, { text: message });
-        res.json({ success: true, sentTo: cleanNumber });
+        // 1. Verifica se o número existe antes de enviar (Evita Fantasmas)
+        const [result] = await sock.onWhatsApp(jid);
+        if (!result || !result.exists) {
+            return res.status(404).json({ error: "Este número não existe no WhatsApp." });
+        }
+
+        // 2. Tenta enviar e AGUARDA a confirmação do socket
+        const sentMsg = await sock.sendMessage(result.jid, { text: message });
+        
+        if (sentMsg) {
+            console.log(`Mensagem entregue para: ${result.jid}`);
+            return res.json({ success: true, sentTo: result.jid });
+        } else {
+            throw new Error("Falha no envio interno");
+        }
+
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error("ERRO NO DISPARO:", err.message);
+        // Se der erro de conexão fechada, avisa o Lovable corretamente
+        res.status(500).json({ error: "Conexão perdida com o celular. Tente reconectar." });
     }
 });
 
