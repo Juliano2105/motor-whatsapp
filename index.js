@@ -18,8 +18,9 @@ async function connectToWA() {
     sock = makeWASocket({ 
         auth: state, 
         printQRInTerminal: true,
-        connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 30000 // Aumentado para esperar a resposta do zap
+        connectTimeoutMs: 120000, // 2 minutos de timeout para conexões lentas
+        defaultQueryTimeoutMs: 60000,
+        keepAliveIntervalMs: 30000
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -32,18 +33,24 @@ async function connectToWA() {
         
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            console.log("Conexão fechada por erro:", statusCode);
+            console.log("Conexão fechada. Status:", statusCode);
             
-            // Se a sessão estiver "podre" (428 ou 401), limpa tudo
-            if (statusCode === 428 || statusCode === 401 || statusCode === 440) {
-                console.log("Limpando arquivos de sessão antigos...");
-                if (fs.existsSync('./auth_info')) fs.rmSync('./auth_info', { recursive: true, force: true });
+            // Se o erro for de sessão perdida ou expirada (401, 428, 440)
+            if ([401, 428, 440, 515].includes(statusCode)) {
+                console.log("Limpando sessão antiga para gerar novo QR Code...");
+                if (fs.existsSync('./auth_info')) {
+                    fs.rmSync('./auth_info', { recursive: true, force: true });
+                }
+                connectionStatus = "Desconectado";
+                setTimeout(() => connectToWA(), 5000);
+            } else if (statusCode !== DisconnectReason.loggedOut) {
+                // Tenta reconectar em outros casos de queda de sinal
+                setTimeout(() => connectToWA(), 5000);
             }
-            connectToWA();
         } else if (connection === 'open') {
             qrCodeBase64 = null;
             connectionStatus = "Conectado";
-            console.log("WHATSAPP CONECTADO E PRONTO");
+            console.log("WHATSAPP CONECTADO E PRONTO PARA ENVIO");
         }
     });
 
@@ -52,41 +59,31 @@ async function connectToWA() {
 
 app.get('/status', (req, res) => res.json({ status: connectionStatus, qr: qrCodeBase64 }));
 
-// ROTA DE ENVIO COM VALIDAÇÃO DE ENTREGA
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
     
+    // Verifica se o socket está pronto
     if (!sock || connectionStatus !== "Conectado") {
         return res.status(503).json({ error: "O servidor não está conectado ao WhatsApp celular." });
     }
 
     try {
-        // Limpeza do número
         let cleanNumber = String(number).replace(/\D/g, '');
         if (!cleanNumber.startsWith('55')) cleanNumber = '55' + cleanNumber;
-        
         const jid = `${cleanNumber}@s.whatsapp.net`;
 
-        // 1. Verifica se o número existe antes de enviar (Evita Fantasmas)
+        // Verifica se o número existe antes de enviar para evitar chats fantasmas
         const [result] = await sock.onWhatsApp(jid);
         if (!result || !result.exists) {
-            return res.status(404).json({ error: "Este número não existe no WhatsApp." });
+            return res.status(404).json({ error: "Este número não possui WhatsApp." });
         }
 
-        // 2. Tenta enviar e AGUARDA a confirmação do socket
-        const sentMsg = await sock.sendMessage(result.jid, { text: message });
-        
-        if (sentMsg) {
-            console.log(`Mensagem entregue para: ${result.jid}`);
-            return res.json({ success: true, sentTo: result.jid });
-        } else {
-            throw new Error("Falha no envio interno");
-        }
-
+        await sock.sendMessage(result.jid, { text: message });
+        console.log(`Mensagem enviada para: ${result.jid}`);
+        res.json({ success: true, sentTo: result.jid });
     } catch (err) {
-        console.error("ERRO NO DISPARO:", err.message);
-        // Se der erro de conexão fechada, avisa o Lovable corretamente
-        res.status(500).json({ error: "Conexão perdida com o celular. Tente reconectar." });
+        console.error("ERRO NO ENVIO:", err.message);
+        res.status(500).json({ error: "Erro de conexão no disparo. Tente novamente." });
     }
 });
 
