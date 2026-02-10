@@ -1,68 +1,65 @@
 const express = require('express');
 const cors = require('cors');
 const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } = require("@whiskeysockets/baileys");
+const QRCode = require('qrcode');
 const fs = require('fs');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-let pairingCode = null;
+let qrCodeBase64 = null;
 let connectionStatus = "Desconectado";
 let sock = null;
 
 async function connectToWA() {
-    // MUDANÇA TOTAL: 'sessao_nova_identidade' limpa qualquer rastro anterior
-    const { state, saveCreds } = await useMultiFileAuthState('./sessao_nova_identidade');
+    // Nova pasta 'sessao_qr_final' para limpar erros de pareamento anteriores
+    const { state, saveCreds } = await useMultiFileAuthState('./sessao_qr_final');
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
         version,
         auth: state,
         printQRInTerminal: false,
-        // NOVA IDENTIDADE: Simular um Mac costuma destravar o erro instantâneo
+        // Identidade macOS Safari para melhor aceitação no pareamento
         browser: ["macOS", "Safari", "17.0"],
         connectTimeoutMs: 120000,
+        // Travas de memória para o Railway não desligar o container (SIGTERM)
         syncFullHistory: false,
         shouldSyncHistoryMessage: () => false,
         markOnlineOnConnect: false
     });
 
-    if (!sock.authState.creds.registered && !pairingCode) {
-        setTimeout(async () => {
-            try {
-                // VERIFIQUE SE ESTE É O SEU NÚMERO (55 + DDD + Numero)
-                const meuNumero = "5543991838384"; 
-                pairingCode = await sock.requestPairingCode(meuNumero);
-                connectionStatus = "Aguardando Código";
-                console.log("NOVO CÓDIGO DE IDENTIDADE:", pairingCode);
-            } catch (e) {
-                console.error("Erro:", e);
-                pairingCode = null;
-            }
-        }, 15000); 
-    }
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'open') {
-            connectionStatus = "Conectado";
-            pairingCode = null;
-            console.log("CONEXÃO ESTABELECIDA!");
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        if (qr) {
+            qrCodeBase64 = await QRCode.toDataURL(qr);
+            connectionStatus = "Aguardando Leitura";
         }
+        
+        if (connection === 'open') {
+            qrCodeBase64 = null;
+            connectionStatus = "Conectado";
+            console.log("SUCESSO: CONECTADO VIA QR CODE!");
+        }
+        
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
+            // Se der erro crítico, limpa a sessão e tenta novamente
             if ([401, 408, 428, 515].includes(statusCode)) {
-                if (fs.existsSync('./sessao_nova_identidade')) fs.rmSync('./sessao_nova_identidade', { recursive: true, force: true });
+                if (fs.existsSync('./sessao_qr_final')) fs.rmSync('./sessao_qr_final', { recursive: true, force: true });
             }
-            if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => connectToWA(), 5000);
+            if (statusCode !== DisconnectReason.loggedOut) {
+                setTimeout(() => connectToWA(), 5000);
+            }
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
 }
 
-app.get('/status', (req, res) => res.json({ status: connectionStatus, code: pairingCode }));
+app.get('/status', (req, res) => res.json({ status: connectionStatus, qr: qrCodeBase64 }));
 
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
@@ -75,4 +72,5 @@ app.post('/send', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.listen(process.env.PORT || 3000, () => connectToWA());
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => connectToWA());
