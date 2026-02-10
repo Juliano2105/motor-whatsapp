@@ -13,20 +13,19 @@ let connectionStatus = "Desconectado";
 let sock = null;
 
 async function connectToWA() {
-    // 1. Forçamos a pasta 'sessao_v2' para garantir que não usemos lixo do passado
-    const { state, saveCreds } = await useMultiFileAuthState('./sessao_v2');
+    // MUDANÇA PARA 'sessao_v3' - Isso reseta o acesso antigo fisicamente no servidor
+    const { state, saveCreds } = await useMultiFileAuthState('./sessao_v3');
     const { version } = await fetchLatestBaileysVersion();
     
     sock = makeWASocket({ 
         version,
         auth: state, 
         printQRInTerminal: false,
-        // CONFIGURAÇÕES PARA EVITAR O ERRO 408 (TIMEOUT)
-        connectTimeoutMs: 180000, // 3 minutos para dar tempo de parear
-        defaultQueryTimeoutMs: 0, 
-        keepAliveIntervalMs: 10000,
-        syncFullHistory: false,
-        qrTimeout: 120000 // QR Code dura 2 minutos antes de expirar
+        // Altera como o servidor se identifica para o celular
+        browser: ["Sistema_Novo", "Chrome", "1.0.0"],
+        connectTimeoutMs: 180000, 
+        defaultQueryTimeoutMs: 0,
+        syncFullHistory: false
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -39,12 +38,11 @@ async function connectToWA() {
         
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
-            console.log(`[LOG] Conexão encerrada. Código: ${statusCode}`);
+            console.log(`[LOG] Erro detectado: ${statusCode}`);
             
-            // Se der erro crítico (incluindo o 408 de timeout), limpa e reinicia
+            // Se der erro de tempo ou autenticação, limpa a V3 e reinicia
             if ([401, 408, 428, 515].includes(statusCode)) {
-                console.log("Reiniciando sessão por erro de tempo ou autenticação...");
-                if (fs.existsSync('./sessao_v2')) fs.rmSync('./sessao_v2', { recursive: true, force: true });
+                if (fs.existsSync('./sessao_v3')) fs.rmSync('./sessao_v3', { recursive: true, force: true });
                 connectionStatus = "Desconectado";
                 setTimeout(() => connectToWA(), 5000);
             } else if (statusCode !== DisconnectReason.loggedOut) {
@@ -53,7 +51,7 @@ async function connectToWA() {
         } else if (connection === 'open') {
             qrCodeBase64 = null;
             connectionStatus = "Conectado";
-            console.log("--- WHATSAPP CONECTADO COM SUCESSO ---");
+            console.log("CONEXÃO ESTABELECIDA COM SUCESSO");
         }
     });
 
