@@ -1,4 +1,4 @@
-FROM node:18-bullseye-slim
+FROM node:20-bullseye-slim
 
 # Instala dependências do sistema para o WhatsApp
 RUN apt-get update && apt-get install -y \
