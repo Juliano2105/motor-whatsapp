@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
 const QRCode = require('qrcode');
+const fs = require('fs'); // Necessário para apagar arquivos
 
 const app = express();
 app.use(cors());
@@ -31,59 +32,53 @@ async function connectToWA() {
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) connectToWA();
+            else connectionStatus = "Desconectado";
         } else if (connection === 'open') {
             qrCodeBase64 = null;
             connectionStatus = "Conectado";
-            console.log('WhatsApp Conectado com Sucesso!');
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
 }
 
+// NOVA ROTA: LIMPEZA PROFUNDA DE SESSÃO
+app.post('/reset-session', async (req, res) => {
+    try {
+        connectionStatus = "Limpando...";
+        if (sock) sock.logout();
+        
+        // Apaga a pasta de autenticação para forçar novo QR Code
+        if (fs.existsSync('./auth_info')) {
+            fs.rmSync('./auth_info', { recursive: true, force: true });
+        }
+        
+        res.json({ success: true, message: "Sessão apagada. O servidor vai reiniciar." });
+        setTimeout(() => process.exit(0), 1000); // Reinicia o servidor
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/status', (req, res) => {
     res.json({ status: connectionStatus, qr: qrCodeBase64 });
 });
 
-// ROTA DE ENVIO COM FORMATAÇÃO RÍGIDA BRASIL
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
-
-    if (!number || !message) {
-        return res.status(400).json({ error: "Número e mensagem são obrigatórios" });
-    }
-
-    if (connectionStatus !== "Conectado" || !sock) {
-        return res.status(503).json({ error: "WhatsApp não está conectado" });
-    }
+    if (!number || !message) return res.status(400).json({ error: "Dados incompletos" });
+    if (connectionStatus !== "Conectado" || !sock) return res.status(503).json({ error: "WhatsApp Desconectado" });
 
     try {
-        // 1. Limpeza total: remove TUDO que não for número (espaços, +, -, parênteses)
         let cleanNumber = number.toString().replace(/\D/g, '');
-
-        // 2. Lógica de correção de DDI (55)
-        // Se o número tiver 10 ou 11 dígitos (DDD + Número), adicionamos o 55 na frente
-        if (cleanNumber.length === 10 || cleanNumber.length === 11) {
-            cleanNumber = '55' + cleanNumber;
-        } 
-        // Se o número tiver 8 ou 9 dígitos (sem DDD), ele ainda vai dar erro, 
-        // então o ideal é sempre enviar com DDD.
-
+        if (!cleanNumber.startsWith('55')) cleanNumber = '55' + cleanNumber;
         const jid = `${cleanNumber}@s.whatsapp.net`;
-        
-        console.log(`Tentando enviar para JID formatado: ${jid}`);
-        
         await sock.sendMessage(jid, { text: message });
-        
-        res.json({ success: true, sentTo: cleanNumber });
+        res.json({ success: true });
     } catch (err) {
-        console.error('Erro no disparo:', err);
         res.status(500).json({ error: err.message });
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => { 
-    console.log(`Servidor rodando na porta ${PORT}`); 
-    connectToWA(); 
-});
+app.listen(PORT, () => { connectToWA(); });
