@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
 const QRCode = require('qrcode');
-const fs = require('fs'); // Necessário para apagar arquivos
 
 const app = express();
 app.use(cors());
@@ -14,21 +13,18 @@ let sock;
 
 async function connectToWA() {
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
-    
     sock = makeWASocket({ 
         auth: state, 
         printQRInTerminal: true,
-        defaultQueryTimeoutMs: undefined 
+        defaultQueryTimeoutMs: 60000 // Aumentado para evitar quedas
     });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
-        
         if (qr) {
             qrCodeBase64 = await QRCode.toDataURL(qr);
             connectionStatus = "Aguardando Leitura";
         }
-        
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) connectToWA();
@@ -36,46 +32,41 @@ async function connectToWA() {
         } else if (connection === 'open') {
             qrCodeBase64 = null;
             connectionStatus = "Conectado";
+            console.log("CONECTADO COM SUCESSO AO WHATSAPP");
         }
     });
-
     sock.ev.on('creds.update', saveCreds);
 }
 
-// NOVA ROTA: LIMPEZA PROFUNDA DE SESSÃO
-app.post('/reset-session', async (req, res) => {
-    try {
-        connectionStatus = "Limpando...";
-        if (sock) sock.logout();
-        
-        // Apaga a pasta de autenticação para forçar novo QR Code
-        if (fs.existsSync('./auth_info')) {
-            fs.rmSync('./auth_info', { recursive: true, force: true });
-        }
-        
-        res.json({ success: true, message: "Sessão apagada. O servidor vai reiniciar." });
-        setTimeout(() => process.exit(0), 1000); // Reinicia o servidor
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
+app.get('/status', (req, res) => res.json({ status: connectionStatus, qr: qrCodeBase64 }));
 
-app.get('/status', (req, res) => {
-    res.json({ status: connectionStatus, qr: qrCodeBase64 });
-});
-
+// ROTA DE ENVIO COM LIMPEZA ATÔMICA
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
-    if (!number || !message) return res.status(400).json({ error: "Dados incompletos" });
-    if (connectionStatus !== "Conectado" || !sock) return res.status(503).json({ error: "WhatsApp Desconectado" });
-
+    
     try {
-        let cleanNumber = number.toString().replace(/\D/g, '');
-        if (!cleanNumber.startsWith('55')) cleanNumber = '55' + cleanNumber;
-        const jid = `${cleanNumber}@s.whatsapp.net`;
+        // 1. Converte para texto e remove TUDO que não for dígito
+        let rawNumber = String(number).replace(/\D/g, '');
+
+        // 2. Se o número começar com 0 (comum em alguns cadastros), remove o 0
+        if (rawNumber.startsWith('0')) rawNumber = rawNumber.substring(1);
+
+        // 3. Garante o 55 (Brasil). Se tiver menos de 12 dígitos, falta o 55.
+        // Um número com DDD + Numero tem 10 ou 11 dígitos.
+        if (rawNumber.length <= 11) {
+            rawNumber = '55' + rawNumber;
+        }
+
+        // 4. Monta o JID final sem NENHUM espaço ou caractere especial
+        const jid = `${rawNumber}@s.whatsapp.net`;
+        
+        console.log(`[LOG DE DISPARO] Enviando para: ${jid}`);
+
         await sock.sendMessage(jid, { text: message });
-        res.json({ success: true });
+        
+        res.json({ success: true, jidSent: jid });
     } catch (err) {
+        console.error("ERRO NO WHATSAPP:", err);
         res.status(500).json({ error: err.message });
     }
 });
