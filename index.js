@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } = require("@whiskeysockets/baileys");
 const fs = require('fs');
 
 const app = express();
@@ -12,8 +12,8 @@ let connectionStatus = "Desconectado";
 let sock = null;
 
 async function connectToWA() {
-    // Usamos uma pasta totalmente nova para garantir o reset
-    const { state, saveCreds } = await useMultiFileAuthState('./sessao_codigo');
+    // Mantemos a pasta sessao_codigo_final para não perder o que já foi feito
+    const { state, saveCreds } = await useMultiFileAuthState('./sessao_codigo_final');
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
@@ -21,35 +21,44 @@ async function connectToWA() {
         auth: state,
         printQRInTerminal: false,
         browser: ["Ubuntu", "Chrome", "20.0.04"],
-        connectTimeoutMs: 60000,
-        syncFullHistory: false
+        connectTimeoutMs: 120000,
+        // CONFIGURAÇÕES CRUCIAL: Bloqueia a sincronização que derruba o servidor
+        syncFullHistory: false,
+        markOnlineOnConnect: false,
+        shouldSyncHistoryMessage: () => false, 
+        getMessage: async (key) => { return { conversation: "" } }
     });
 
-    // SOLICITA O CÓDIGO DE PAREAMENTO (Mude o número abaixo para o SEU número com DDD)
-    // Exemplo: 5543991838384
-    if (!sock.authState.creds.registered) {
+    // Pede o código apenas se não estiver conectado e não houver um código na tela
+    if (!sock.authState.creds.registered && !pairingCode) {
         setTimeout(async () => {
-            // COLOQUE O SEU NÚMERO DE WHATSAPP AQUI PARA GERAR O CÓDIGO
-            let meuNumero = "5543991838384"; 
-            pairingCode = await sock.requestPairingCode(meuNumero);
-            connectionStatus = "Aguardando Código: " + pairingCode;
-            console.log("DIGITE ESTE CÓDIGO NO SEU CELULAR:", pairingCode);
-        }, 5000);
+            try {
+                const meuNumero = "5543991838384"; // Verifique se este é seu número
+                pairingCode = await sock.requestPairingCode(meuNumero);
+                connectionStatus = "Aguardando Código";
+                console.log("CÓDIGO FIXO GERADO:", pairingCode);
+            } catch (e) {
+                console.error("Erro ao gerar código:", e);
+                pairingCode = null;
+            }
+        }, 15000); 
     }
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
+        
         if (connection === 'open') {
             connectionStatus = "Conectado";
             pairingCode = null;
-            console.log("CONECTADO COM SUCESSO!");
+            console.log("SUCESSO TOTAL!");
         }
+        
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            if ([401, 408, 515].includes(statusCode)) {
-                if (fs.existsSync('./sessao_codigo')) fs.rmSync('./sessao_codigo', { recursive: true, force: true });
+            // Se o erro for de conexão fechada (428) ou stream (515), ele tenta voltar sem mudar o código
+            if (statusCode !== DisconnectReason.loggedOut) {
+                setTimeout(() => connectToWA(), 5000);
             }
-            connectToWA();
         }
     });
 
@@ -60,7 +69,7 @@ app.get('/status', (req, res) => res.json({ status: connectionStatus, code: pair
 
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
-    if (connectionStatus !== "Conectado") return res.status(503).json({ error: "Offline" });
+    if (connectionStatus !== "Conectado") return res.status(503).json({ error: "Desconectado" });
     try {
         let cleanNumber = String(number).replace(/\D/g, '');
         if (!cleanNumber.startsWith('55')) cleanNumber = '55' + cleanNumber;
@@ -69,4 +78,5 @@ app.post('/send', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.listen(process.env.PORT || 3000, () => connectToWA());
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => connectToWA());
