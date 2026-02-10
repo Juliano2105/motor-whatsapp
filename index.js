@@ -13,21 +13,25 @@ let connectionStatus = "Desconectado";
 let sock = null;
 
 async function connectToWA() {
-    // Nova pasta 'sessao_qr_final' para limpar erros de pareamento anteriores
-    const { state, saveCreds } = await useMultiFileAuthState('./sessao_qr_final');
+    // 1. Usamos um nome de pasta que reseta a identidade (como as APIs pagas fazem)
+    const sessionDir = './session_pro_paid';
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
         version,
         auth: state,
         printQRInTerminal: false,
-        // Identidade macOS Safari para melhor aceitação no pareamento
+        // 2. Identidade de Navegador estável (macOS Safari é a menos bloqueada)
         browser: ["macOS", "Safari", "17.0"],
-        connectTimeoutMs: 120000,
-        // Travas de memória para o Railway não desligar o container (SIGTERM)
+        // 3. Otimização de rede para quem tem servidor pago
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
+        keepAliveIntervalMs: 10000,
+        // 4. BLOQUEIO DE SINCRONIZAÇÃO (Essencial para não travar após o QR Code)
         syncFullHistory: false,
         shouldSyncHistoryMessage: () => false,
-        markOnlineOnConnect: false
+        markOnlineOnConnect: true
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -41,16 +45,19 @@ async function connectToWA() {
         if (connection === 'open') {
             qrCodeBase64 = null;
             connectionStatus = "Conectado";
-            console.log("SUCESSO: CONECTADO VIA QR CODE!");
+            console.log("--- INSTÂNCIA ATIVA E ONLINE ---");
         }
         
         if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            // Se der erro crítico, limpa a sessão e tenta novamente
-            if ([401, 408, 428, 515].includes(statusCode)) {
-                if (fs.existsSync('./sessao_qr_final')) fs.rmSync('./sessao_qr_final', { recursive: true, force: true });
-            }
-            if (statusCode !== DisconnectReason.loggedOut) {
+            const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
+            console.log(`[LOG] Conexão encerrada: ${statusCode}`);
+            
+            // Se der erro de autenticação ou conexão fechada (428), deleta tudo e recomeça limpo
+            if ([401, 403, 408, 428, 515].includes(statusCode)) {
+                console.log("Limpando cache de sessão corrompida...");
+                if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
+                setTimeout(() => connectToWA(), 3000);
+            } else if (statusCode !== DisconnectReason.loggedOut) {
                 setTimeout(() => connectToWA(), 5000);
             }
         }
@@ -63,7 +70,7 @@ app.get('/status', (req, res) => res.json({ status: connectionStatus, qr: qrCode
 
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
-    if (connectionStatus !== "Conectado") return res.status(503).json({ error: "Offline" });
+    if (connectionStatus !== "Conectado") return res.status(503).json({ error: "Instância Offline" });
     try {
         let cleanNumber = String(number).replace(/\D/g, '');
         if (!cleanNumber.startsWith('55')) cleanNumber = '55' + cleanNumber;
