@@ -12,22 +12,16 @@ let qrCodeBase64 = null;
 let connectionStatus = "Desconectado";
 let sock = null;
 
-function clearAuth() {
-    if (fs.existsSync('./auth_info')) {
-        console.log("Limpando pasta de autenticação para evitar erros...");
-        fs.rmSync('./auth_info', { recursive: true, force: true });
-    }
-}
-
 async function connectToWA() {
-    const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+    // MUDANÇA CRUCIAL: 'sessao_v2' força um reset físico no servidor Railway
+    const { state, saveCreds } = await useMultiFileAuthState('./sessao_v2');
     
     sock = makeWASocket({ 
         auth: state, 
         printQRInTerminal: false,
         connectTimeoutMs: 120000,
         defaultQueryTimeoutMs: 60000,
-        syncFullHistory: false
+        syncFullHistory: false // Impede o erro 515 de sincronização lenta
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -42,8 +36,11 @@ async function connectToWA() {
             const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
             console.log(`[LOG] Conexão encerrada. Código: ${statusCode}`);
             
+            // Se a sessão der erro, limpa a pasta nova e reinicia
             if ([401, 428, 440, 515, 511].includes(statusCode)) {
-                clearAuth();
+                if (fs.existsSync('./sessao_v2')) {
+                    fs.rmSync('./sessao_v2', { recursive: true, force: true });
+                }
                 connectionStatus = "Desconectado";
                 setTimeout(() => connectToWA(), 5000);
             } else if (statusCode !== DisconnectReason.loggedOut) {
@@ -52,7 +49,7 @@ async function connectToWA() {
         } else if (connection === 'open') {
             qrCodeBase64 = null;
             connectionStatus = "Conectado";
-            console.log("WHATSAPP CONECTADO COM SUCESSO!");
+            console.log("SUCESSO: WHATSAPP CONECTADO NA SESSÃO V2");
         }
     });
 
@@ -71,7 +68,7 @@ app.post('/send', async (req, res) => {
         const jid = `${cleanNumber}@s.whatsapp.net`;
         
         const [result] = await sock.onWhatsApp(jid);
-        if (!result || !result.exists) return res.status(404).json({ error: "Número inexistente" });
+        if (!result || !result.exists) return res.status(404).json({ error: "Número inválido" });
 
         await sock.sendMessage(result.jid, { text: message });
         res.json({ success: true });
@@ -80,27 +77,5 @@ app.post('/send', async (req, res) => {
     }
 });
 
-app.post('/disconnect', async (req, res) => {
-    try {
-        if (sock) {
-            await sock.logout();
-            sock = null;
-        }
-        clearAuth();
-        connectionStatus = "Desconectado";
-        qrCodeBase64 = null;
-        res.json({ success: true, message: "Desconectado com sucesso" });
-        setTimeout(() => connectToWA(), 3000);
-    } catch (err) {
-        console.error("Erro ao desconectar:", err.message);
-        connectionStatus = "Desconectado";
-        clearAuth();
-        res.json({ success: true, message: "Sessão limpa" });
-        setTimeout(() => connectToWA(), 3000);
-    }
-});
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => { 
-    connectToWA(); 
-});
+app.listen(PORT, () => { connectToWA(); });
