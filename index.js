@@ -12,58 +12,50 @@ let connectionStatus = "Desconectado";
 let sock = null;
 
 async function connectToWA() {
-    // Usamos 'sessao_final_v4' para garantir que o Railway crie um espaço 100% limpo
-    const { state, saveCreds } = await useMultiFileAuthState('./sessao_final_v4');
+    // MUDANÇA TOTAL: 'sessao_nova_identidade' limpa qualquer rastro anterior
+    const { state, saveCreds } = await useMultiFileAuthState('./sessao_nova_identidade');
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
         version,
         auth: state,
         printQRInTerminal: false,
-        // Identificação como um navegador comum para evitar bloqueios
-        browser: ["Ubuntu", "Chrome", "20.0.04"],
-        // Aumentamos o tempo de espera para 3 minutos para evitar o erro 'Não foi possível conectar'
-        connectTimeoutMs: 180000, 
-        defaultQueryTimeoutMs: 0,
-        // Bloqueia sincronização de histórico que trava o servidor Railway
+        // NOVA IDENTIDADE: Simular um Mac costuma destravar o erro instantâneo
+        browser: ["macOS", "Safari", "17.0"],
+        connectTimeoutMs: 120000,
         syncFullHistory: false,
         shouldSyncHistoryMessage: () => false,
         markOnlineOnConnect: false
     });
 
-    // Gera o código de 8 dígitos apenas se não estiver conectado
-    if (!sock.authState.creds.registered) {
+    if (!sock.authState.creds.registered && !pairingCode) {
         setTimeout(async () => {
             try {
-                // SEU NÚMERO DE WHATSAPP COM DDD
+                // VERIFIQUE SE ESTE É O SEU NÚMERO (55 + DDD + Numero)
                 const meuNumero = "5543991838384"; 
                 pairingCode = await sock.requestPairingCode(meuNumero);
                 connectionStatus = "Aguardando Código";
-                console.log("CÓDIGO PARA PAREAMENTO:", pairingCode);
+                console.log("NOVO CÓDIGO DE IDENTIDADE:", pairingCode);
             } catch (e) {
-                console.error("Erro ao gerar código:", e);
+                console.error("Erro:", e);
                 pairingCode = null;
             }
-        }, 20000); // Aguarda 20 segundos para o servidor estabilizar antes de pedir o código
+        }, 15000); 
     }
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
-        
         if (connection === 'open') {
             connectionStatus = "Conectado";
             pairingCode = null;
-            console.log("SUCESSO: WHATSAPP CONECTADO");
+            console.log("CONEXÃO ESTABELECIDA!");
         }
-        
         if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
-            console.log(`[LOG] Conexão fechada: ${statusCode}`);
-            
-            // Se a sessão cair por erro de sincronização ou timeout, tenta voltar
-            if (statusCode !== DisconnectReason.loggedOut) {
-                setTimeout(() => connectToWA(), 5000);
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            if ([401, 408, 428, 515].includes(statusCode)) {
+                if (fs.existsSync('./sessao_nova_identidade')) fs.rmSync('./sessao_nova_identidade', { recursive: true, force: true });
             }
+            if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => connectToWA(), 5000);
         }
     });
 
@@ -74,16 +66,13 @@ app.get('/status', (req, res) => res.json({ status: connectionStatus, code: pair
 
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
-    if (connectionStatus !== "Conectado") return res.status(503).json({ error: "Servidor Offline" });
+    if (connectionStatus !== "Conectado") return res.status(503).json({ error: "Offline" });
     try {
         let cleanNumber = String(number).replace(/\D/g, '');
         if (!cleanNumber.startsWith('55')) cleanNumber = '55' + cleanNumber;
         await sock.sendMessage(`${cleanNumber}@s.whatsapp.net`, { text: message });
         res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => connectToWA());
+app.listen(process.env.PORT || 3000, () => connectToWA());
