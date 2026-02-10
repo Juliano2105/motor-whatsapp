@@ -13,14 +13,15 @@ let connectionStatus = "Desconectado";
 let sock = null;
 
 async function connectToWA() {
+    // 1. Inicia autenticação limpa
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
     
     sock = makeWASocket({ 
         auth: state, 
-        printQRInTerminal: true,
-        connectTimeoutMs: 120000, // 2 minutos de timeout para conexões lentas
+        printQRInTerminal: false, // Evita avisos de depreciação nos logs
+        connectTimeoutMs: 120000,
         defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000
+        keepAliveIntervalMs: 20000
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -32,25 +33,26 @@ async function connectToWA() {
         }
         
         if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            console.log("Conexão fechada. Status:", statusCode);
+            const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
+            console.log(`[AVISO] Conexão encerrada. Código: ${statusCode}`);
             
-            // Se o erro for de sessão perdida ou expirada (401, 428, 440)
+            // SE DETECTAR ERRO 515 OU SESSÃO EXPIRADA, LIMPA TUDO
             if ([401, 428, 440, 515].includes(statusCode)) {
-                console.log("Limpando sessão antiga para gerar novo QR Code...");
+                console.log("Detectado erro crítico. Limpando pasta de sessão...");
                 if (fs.existsSync('./auth_info')) {
                     fs.rmSync('./auth_info', { recursive: true, force: true });
                 }
                 connectionStatus = "Desconectado";
+                // Reinicia do zero absoluto após 5 segundos
                 setTimeout(() => connectToWA(), 5000);
-            } else if (statusCode !== DisconnectReason.loggedOut) {
-                // Tenta reconectar em outros casos de queda de sinal
+            } else if (connectionStatus !== "Desconectado") {
+                // Tenta reconectar em casos simples de queda de internet
                 setTimeout(() => connectToWA(), 5000);
             }
         } else if (connection === 'open') {
             qrCodeBase64 = null;
             connectionStatus = "Conectado";
-            console.log("WHATSAPP CONECTADO E PRONTO PARA ENVIO");
+            console.log("--- WHATSAPP CONECTADO COM SUCESSO ---");
         }
     });
 
@@ -62,9 +64,8 @@ app.get('/status', (req, res) => res.json({ status: connectionStatus, qr: qrCode
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
     
-    // Verifica se o socket está pronto
     if (!sock || connectionStatus !== "Conectado") {
-        return res.status(503).json({ error: "O servidor não está conectado ao WhatsApp celular." });
+        return res.status(503).json({ error: "O servidor não está conectado. Por favor, gere um novo QR Code." });
     }
 
     try {
@@ -72,18 +73,18 @@ app.post('/send', async (req, res) => {
         if (!cleanNumber.startsWith('55')) cleanNumber = '55' + cleanNumber;
         const jid = `${cleanNumber}@s.whatsapp.net`;
 
-        // Verifica se o número existe antes de enviar para evitar chats fantasmas
+        // Verifica existência antes para não criar conversas fantasmas
         const [result] = await sock.onWhatsApp(jid);
         if (!result || !result.exists) {
-            return res.status(404).json({ error: "Este número não possui WhatsApp." });
+            return res.status(404).json({ error: "Número não encontrado." });
         }
 
         await sock.sendMessage(result.jid, { text: message });
-        console.log(`Mensagem enviada para: ${result.jid}`);
+        console.log(`[OK] Enviado para: ${result.jid}`);
         res.json({ success: true, sentTo: result.jid });
     } catch (err) {
-        console.error("ERRO NO ENVIO:", err.message);
-        res.status(500).json({ error: "Erro de conexão no disparo. Tente novamente." });
+        console.error("[ERRO]", err.message);
+        res.status(500).json({ error: "Erro interno no disparo. Verifique a conexão do celular." });
     }
 });
 
