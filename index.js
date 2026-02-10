@@ -12,7 +12,6 @@ let qrCodeBase64 = null;
 let connectionStatus = "Desconectado";
 let sock = null;
 
-// FUNÇÃO PARA LIMPAR TUDO ANTES DE COMEÇAR
 function clearAuth() {
     if (fs.existsSync('./auth_info')) {
         console.log("Limpando pasta de autenticação para evitar erros...");
@@ -21,7 +20,6 @@ function clearAuth() {
 }
 
 async function connectToWA() {
-    // Se o status for Desconectado por erro, limpamos a pasta fisicamente
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
     
     sock = makeWASocket({ 
@@ -29,7 +27,7 @@ async function connectToWA() {
         printQRInTerminal: false,
         connectTimeoutMs: 120000,
         defaultQueryTimeoutMs: 60000,
-        syncFullHistory: false // Conecta muito mais rápido
+        syncFullHistory: false
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -44,7 +42,6 @@ async function connectToWA() {
             const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
             console.log(`[LOG] Conexão encerrada. Código: ${statusCode}`);
             
-            // Erros que exigem limpeza imediata (incluindo o 515 que você teve)
             if ([401, 428, 440, 515, 511].includes(statusCode)) {
                 clearAuth();
                 connectionStatus = "Desconectado";
@@ -83,9 +80,27 @@ app.post('/send', async (req, res) => {
     }
 });
 
+app.post('/disconnect', async (req, res) => {
+    try {
+        if (sock) {
+            await sock.logout();
+            sock = null;
+        }
+        clearAuth();
+        connectionStatus = "Desconectado";
+        qrCodeBase64 = null;
+        res.json({ success: true, message: "Desconectado com sucesso" });
+        setTimeout(() => connectToWA(), 3000);
+    } catch (err) {
+        console.error("Erro ao desconectar:", err.message);
+        connectionStatus = "Desconectado";
+        clearAuth();
+        res.json({ success: true, message: "Sessão limpa" });
+        setTimeout(() => connectToWA(), 3000);
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => { 
-    // Opcional: descomente a linha abaixo se quiser resetar toda vez que o servidor ligar
-    // clearAuth(); 
     connectToWA(); 
 });
