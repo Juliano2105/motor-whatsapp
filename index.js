@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require("@whiskeysockets/baileys");
 const QRCode = require('qrcode');
 const fs = require('fs');
 
@@ -13,15 +13,20 @@ let connectionStatus = "Desconectado";
 let sock = null;
 
 async function connectToWA() {
-    // MUDANÇA CRUCIAL: 'sessao_v2' força um reset físico no servidor Railway
+    // 1. Forçamos a pasta 'sessao_v2' para garantir que não usemos lixo do passado
     const { state, saveCreds } = await useMultiFileAuthState('./sessao_v2');
+    const { version } = await fetchLatestBaileysVersion();
     
     sock = makeWASocket({ 
+        version,
         auth: state, 
         printQRInTerminal: false,
-        connectTimeoutMs: 120000,
-        defaultQueryTimeoutMs: 60000,
-        syncFullHistory: false // Impede o erro 515 de sincronização lenta
+        // CONFIGURAÇÕES PARA EVITAR O ERRO 408 (TIMEOUT)
+        connectTimeoutMs: 180000, // 3 minutos para dar tempo de parear
+        defaultQueryTimeoutMs: 0, 
+        keepAliveIntervalMs: 10000,
+        syncFullHistory: false,
+        qrTimeout: 120000 // QR Code dura 2 minutos antes de expirar
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -36,11 +41,10 @@ async function connectToWA() {
             const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.payload?.statusCode;
             console.log(`[LOG] Conexão encerrada. Código: ${statusCode}`);
             
-            // Se a sessão der erro, limpa a pasta nova e reinicia
-            if ([401, 428, 440, 515, 511].includes(statusCode)) {
-                if (fs.existsSync('./sessao_v2')) {
-                    fs.rmSync('./sessao_v2', { recursive: true, force: true });
-                }
+            // Se der erro crítico (incluindo o 408 de timeout), limpa e reinicia
+            if ([401, 408, 428, 515].includes(statusCode)) {
+                console.log("Reiniciando sessão por erro de tempo ou autenticação...");
+                if (fs.existsSync('./sessao_v2')) fs.rmSync('./sessao_v2', { recursive: true, force: true });
                 connectionStatus = "Desconectado";
                 setTimeout(() => connectToWA(), 5000);
             } else if (statusCode !== DisconnectReason.loggedOut) {
@@ -49,7 +53,7 @@ async function connectToWA() {
         } else if (connection === 'open') {
             qrCodeBase64 = null;
             connectionStatus = "Conectado";
-            console.log("SUCESSO: WHATSAPP CONECTADO NA SESSÃO V2");
+            console.log("--- WHATSAPP CONECTADO COM SUCESSO ---");
         }
     });
 
@@ -60,17 +64,12 @@ app.get('/status', (req, res) => res.json({ status: connectionStatus, qr: qrCode
 
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
-    if (!sock || connectionStatus !== "Conectado") return res.status(503).json({ error: "Desconectado" });
-
+    if (!sock || connectionStatus !== "Conectado") return res.status(503).json({ error: "Offline" });
     try {
         let cleanNumber = String(number).replace(/\D/g, '');
         if (!cleanNumber.startsWith('55')) cleanNumber = '55' + cleanNumber;
         const jid = `${cleanNumber}@s.whatsapp.net`;
-        
-        const [result] = await sock.onWhatsApp(jid);
-        if (!result || !result.exists) return res.status(404).json({ error: "Número inválido" });
-
-        await sock.sendMessage(result.jid, { text: message });
+        await sock.sendMessage(jid, { text: message });
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
