@@ -9,16 +9,14 @@ app.use(express.json());
 
 let qrCodeBase64 = null;
 let connectionStatus = "Desconectado";
-let sock; // Definido globalmente para ser acessado pela rota /send
+let sock; // Variável global para manter a conexão ativa
 
 async function connectToWA() {
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
     
-    // Inicializa a conexão
     sock = makeWASocket({ 
         auth: state, 
         printQRInTerminal: true,
-        // Adicionado para melhorar a estabilidade da conexão
         defaultQueryTimeoutMs: undefined 
     });
 
@@ -44,34 +42,43 @@ async function connectToWA() {
     sock.ev.on('creds.update', saveCreds);
 }
 
-// Rota para verificar o status
+// Rota de Status
 app.get('/status', (req, res) => {
     res.json({ status: connectionStatus, qr: qrCodeBase64 });
 });
 
-// Rota para envio de mensagens - AGORA CORRIGIDA
+// Rota de Envio de Mensagens com Trava de Segurança para Brasil (+55)
 app.post('/send', async (req, res) => {
-    const { number, message } = req.body;
+    let { number, message } = req.body;
 
     if (!number || !message) {
         return res.status(400).json({ error: "Número e mensagem são obrigatórios" });
     }
 
     if (connectionStatus !== "Conectado" || !sock) {
-        return res.status(503).json({ error: "WhatsApp não está conectado" });
+        return res.status(503).json({ error: "WhatsApp não está conectado no servidor" });
     }
 
     try {
-        // Formata o número para o padrão do WhatsApp (remove tudo que não é número)
-        const cleanNumber = number.replace(/\D/g, '');
+        // 1. Remove espaços, traços e parênteses
+        let cleanNumber = number.replace(/\D/g, '');
+
+        // 2. REGRA DE OURO: Se o número não começar com 55, nós adicionamos.
+        // Isso impede que o 43 (DDD do PR) seja lido como código de país da Áustria.
+        if (!cleanNumber.startsWith('55')) {
+            // Se o usuário digitou 11 dígitos (DDD + Numero), adicionamos o 55
+            // Se digitou apenas o número, ele ainda tentará formatar como Brasil
+            cleanNumber = '55' + cleanNumber;
+        }
+
         const jid = `${cleanNumber}@s.whatsapp.net`;
         
         await sock.sendMessage(jid, { text: message });
         
-        console.log(`Mensagem enviada para ${cleanNumber}`);
-        res.json({ success: true });
+        console.log(`Mensagem enviada com sucesso para: ${cleanNumber}`);
+        res.json({ success: true, sentTo: cleanNumber });
     } catch (err) {
-        console.error('Erro ao enviar mensagem:', err);
+        console.error('Erro interno ao disparar mensagem:', err);
         res.status(500).json({ error: err.message });
     }
 });
