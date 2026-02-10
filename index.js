@@ -9,7 +9,7 @@ app.use(express.json());
 
 let qrCodeBase64 = null;
 let connectionStatus = "Desconectado";
-let sock; // Variável global para manter a conexão ativa
+let sock; 
 
 async function connectToWA() {
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
@@ -30,7 +30,6 @@ async function connectToWA() {
         
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Conexão fechada. Reconectando:', shouldReconnect);
             if (shouldReconnect) connectToWA();
         } else if (connection === 'open') {
             qrCodeBase64 = null;
@@ -42,12 +41,11 @@ async function connectToWA() {
     sock.ev.on('creds.update', saveCreds);
 }
 
-// Rota de Status
 app.get('/status', (req, res) => {
     res.json({ status: connectionStatus, qr: qrCodeBase64 });
 });
 
-// Rota de Envio de Mensagens com Trava de Segurança para Brasil (+55)
+// ROTA DE ENVIO COM FORMATAÇÃO RÍGIDA BRASIL
 app.post('/send', async (req, res) => {
     let { number, message } = req.body;
 
@@ -56,29 +54,30 @@ app.post('/send', async (req, res) => {
     }
 
     if (connectionStatus !== "Conectado" || !sock) {
-        return res.status(503).json({ error: "WhatsApp não está conectado no servidor" });
+        return res.status(503).json({ error: "WhatsApp não está conectado" });
     }
 
     try {
-        // 1. Remove espaços, traços e parênteses
-        let cleanNumber = number.replace(/\D/g, '');
+        // 1. Limpeza total: remove TUDO que não for número (espaços, +, -, parênteses)
+        let cleanNumber = number.toString().replace(/\D/g, '');
 
-        // 2. REGRA DE OURO: Se o número não começar com 55, nós adicionamos.
-        // Isso impede que o 43 (DDD do PR) seja lido como código de país da Áustria.
-        if (!cleanNumber.startsWith('55')) {
-            // Se o usuário digitou 11 dígitos (DDD + Numero), adicionamos o 55
-            // Se digitou apenas o número, ele ainda tentará formatar como Brasil
+        // 2. Lógica de correção de DDI (55)
+        // Se o número tiver 10 ou 11 dígitos (DDD + Número), adicionamos o 55 na frente
+        if (cleanNumber.length === 10 || cleanNumber.length === 11) {
             cleanNumber = '55' + cleanNumber;
-        }
+        } 
+        // Se o número tiver 8 ou 9 dígitos (sem DDD), ele ainda vai dar erro, 
+        // então o ideal é sempre enviar com DDD.
 
         const jid = `${cleanNumber}@s.whatsapp.net`;
         
+        console.log(`Tentando enviar para JID formatado: ${jid}`);
+        
         await sock.sendMessage(jid, { text: message });
         
-        console.log(`Mensagem enviada com sucesso para: ${cleanNumber}`);
         res.json({ success: true, sentTo: cleanNumber });
     } catch (err) {
-        console.error('Erro interno ao disparar mensagem:', err);
+        console.error('Erro no disparo:', err);
         res.status(500).json({ error: err.message });
     }
 });
